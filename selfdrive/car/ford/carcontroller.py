@@ -1,4 +1,5 @@
 import numpy as np
+import logging
 from cereal import car, log
 from openpilot.common.realtime import DT_CTRL
 from opendbc.can.packer import CANPacker
@@ -10,21 +11,31 @@ from openpilot.selfdrive.car.interfaces import CarControllerBase
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
+log = logging.getLogger(__name__)
 LongCtrlState = car.CarControl.Actuators.LongControlState
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 LaneChangeState = log.LaneChangeState # is lane change active
 
-
 def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature, v_ego_raw):
-  # No blending at low speed due to lack of torque wind-up and inaccurate current curvature
+  
+  original = apply_curvature  # Save the unmodified input
+
   if v_ego_raw > 9:
-    apply_curvature = clip(apply_curvature, current_curvature - CarControllerParams.CURVATURE_ERROR,
-                           current_curvature + CarControllerParams.CURVATURE_ERROR)
+    lower_bound = current_curvature - CarControllerParams.CURVATURE_ERROR
+    upper_bound = current_curvature + CarControllerParams.CURVATURE_ERROR
+    pre_rate_limit = clip(apply_curvature, lower_bound, upper_bound)
+  else:
+    pre_rate_limit = apply_curvature  # No bounding at low speeds
 
-  # Curvature rate limit after driver torque limit
-  apply_curvature = apply_std_steer_angle_limits(apply_curvature, apply_curvature_last, v_ego_raw, CarControllerParams)
+  # Apply curvature rate limiting
+  rate_limited = apply_std_steer_angle_limits(pre_rate_limit, apply_curvature_last, v_ego_raw, CarControllerParams)
 
-  return clip(apply_curvature, -CarControllerParams.CURVATURE_MAX, CarControllerParams.CURVATURE_MAX)
+  # Final clip to allowable curvature
+  final = clip(rate_limited, -CarControllerParams.CURVATURE_MAX, CarControllerParams.CURVATURE_MAX)
+
+  log.info(f"[BluePilot] Curvature limited: input={original:.5f}, bounded={pre_rate_limit:.5f}, rate_limited={rate_limited:.5f}, final={final:.5f}")
+
+  return final
 
 def hysteresis(current_value, old_value, target, stdDevLow: float, stdDevHigh: float):
   if target - stdDevLow < current_value < target + stdDevHigh:
@@ -194,6 +205,7 @@ class CarController:
     main_on = CS.out.cruiseState.available
     steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
+    vEgoRaw = CS.out.vEgoRaw
 
     ### acc buttons ###
     if CC.cruiseControl.cancel:
@@ -210,15 +222,28 @@ class CarController:
     ### lateral control ###
     # send steer msg at 20Hz
     if (self.frame % CarControllerParams.STEER_STEP) == 0:
+
+      steeringPressed = CS.out.steeringPressed
+      # Detect if lat was active last frame but isn't now
+      if self.lkas_enabled_last and not CC.latActive:
+        log.info(f"[BluePilot] ⚠️ Lat control deactivated at frame {self.frame}, vEgo: {vEgoRaw:.2f}, steerPressed: {steeringPressed}")
+
+      
       if CC.latActive:
         # apply rate limits, curvature error limit, and clip to signal range
         current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
         desired_curvature = actuators.curvature
         apply_curvature = desired_curvature
         immediate_curvature = apply_ford_curvature_limits(desired_curvature, self.apply_curvature_last, current_curvature, CS.out.vEgoRaw)
+        
+        if abs(apply_curvature) < 1e-6:
+          log.info(f"[BluePilot] ⚠️ Curvature near zero at frame {self.frame}, vEgo: {vEgoRaw:.2f}, latActive: {CC.latActive}")
+  
         self.precision_type = 1 #precise by default
         # equate velocity
-        vEgoRaw = CS.out.vEgoRaw
+        
+        if vEgoRaw < 5:
+          log.info(f"[BluePilot] Low-speed zone — frame: {self.frame}, vEgoRaw: {vEgoRaw:.2f}, latActive: {CC.latActive}")
 
         if model_data is not None and len(model_data.orientation.x) >= CONTROL_N:
           # compute curvature from model predicted orientation
@@ -247,6 +272,9 @@ class CarController:
         # apply ford cuvature safety limits
         apply_curvature = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature, vEgoRaw)
         
+        if abs(apply_curvature) > CarControllerParams.CURVATURE_MAX:
+          log.info(f"[BluePilot] 🚨 Curvature clipped at max: {apply_curvature:.5f}, vEgo: {vEgoRaw:.2f}")
+        
         # if changing lanes, blend PC and DC to smooth out the lane change.
         if self.lane_change:
           if apply_curvature > 0 and model_data.meta.laneChangeState == 1: # initial stages of a right lane change (positive in comma, negative when sent to Ford)
@@ -257,19 +285,25 @@ class CarController:
             if model_data.meta.laneChangeState == 2:
               apply_curvature = apply_curvature * self.lc2_modifier
           self.precision_type = 0 # comfort for lane change
-
+    
       else:
-        apply_curvature = 0.
-
+        if self.apply_curvature_last > 1e-4:
+          log.info(f"[BluePilot] Lat inactive — zeroing curvature at frame {self.frame}, was {self.apply_curvature_last:.5f}")
+        apply_curvature = 0
       # human turn detection
       steeringPressed = CS.out.steeringPressed
       steeringAngleDeg = CS.out.steeringAngleDeg
       
+      # Manual debug trigger via volume up button
+      for be in CS.buttonEvents:
+        if be.type == car.CarState.ButtonEvent.Type.VOLUME_UP and be.pressed:
+          log.info(f"[BluePilot] 🚩 Manual debug flag at frame {self.frame}, vEgo: {CS.out.vEgo:.2f}, latActive: {CC.latActive}, steerPressed: {steeringPressed}")
+
       # Detect steering release (falling edge)
       if not steeringPressed and self.lkas_enabled_last and self.steeringPressedLast:
           self.just_released_steering = True
           self.steering_release_frame = self.frame
-          print(f"[BluePilot] Steering released at frame {self.frame}")
+          log.info(f"[BluePilot] Steering released at frame {self.frame}")
 
       # Gradual curvature ramp-up to prevent snapback
       if self.just_released_steering:
@@ -277,10 +311,10 @@ class CarController:
         if frames_since_release < self.steering_cooldown_frames:
           decay_factor = frames_since_release / self.steering_cooldown_frames
           apply_curvature *= decay_factor
-          print(f"[BluePilot] Fading curvature in — frame: {self.frame}, factor: {decay_factor:.2f}")
+          log.info(f"[BluePilot] Fading curvature in — frame: {self.frame}, factor: {decay_factor:.2f}")
         else:
           self.just_released_steering = False
-          print(f"[BluePilot] Cooldown complete at frame {self.frame}")
+          log.info(f"[BluePilot] Cooldown complete at frame {self.frame}")
       
       self.apply_curvature_last = apply_curvature
       
