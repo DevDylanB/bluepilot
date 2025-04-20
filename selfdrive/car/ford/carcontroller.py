@@ -124,6 +124,11 @@ class CarController:
 
     # Deactivates at self.precharge_actutator_target + self.precharge_actutator_stdDevHigh
     self.target_speed_multiplier = 1 # Default: 0
+    
+    self.just_released_steering = False
+    self.steering_release_frame = 0
+    self.steering_cooldown_frames = 5  # ~100ms fade-in
+    self.steeringPressedLast = False
 
     # model specific tuning
     print(f'CarFingerprint: {self.CP.carFingerprint}')
@@ -259,7 +264,26 @@ class CarController:
       # human turn detection
       steeringPressed = CS.out.steeringPressed
       steeringAngleDeg = CS.out.steeringAngleDeg
+      
+      # Detect steering release (falling edge)
+      if not steeringPressed and self.lkas_enabled_last and self.steeringPressedLast:
+          self.just_released_steering = True
+          self.steering_release_frame = self.frame
+          print(f"[BluePilot] Steering released at frame {self.frame}")
 
+      # Gradual curvature ramp-up to prevent snapback
+      if self.just_released_steering:
+        frames_since_release = self.frame - self.steering_release_frame
+        if frames_since_release < self.steering_cooldown_frames:
+          decay_factor = frames_since_release / self.steering_cooldown_frames
+          apply_curvature *= decay_factor
+          print(f"[BluePilot] Fading curvature in — frame: {self.frame}, factor: {decay_factor:.2f}")
+        else:
+          self.just_released_steering = False
+          print(f"[BluePilot] Cooldown complete at frame {self.frame}")
+      
+      self.apply_curvature_last = apply_curvature
+      
       # if a human turn is active, reset steering to prevent windup
       if steeringPressed and abs(steeringAngleDeg) > 45:
         apply_curvature = 0
@@ -329,4 +353,5 @@ class CarController:
     new_actuators.curvature = self.apply_curvature_last
 
     self.frame += 1
+    self.steeringPressedLast = CS.out.steeringPressed
     return new_actuators, can_sends
