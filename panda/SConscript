@@ -99,7 +99,7 @@ def build_project(project_name, project, extra_flags):
     LINKFLAGS=flags,
     CPPPATH=includes,
     ASCOM="$AS $ASFLAGS -o $TARGET -c $SOURCES",
-    BUILDERS={
+    BUILDERS={git@github.com:commaai/panda.git
       'Objcopy': Builder(generator=objcopy, suffix='.bin', src_suffix='.elf')
     },
     tools=["default", "compilation_db"],
