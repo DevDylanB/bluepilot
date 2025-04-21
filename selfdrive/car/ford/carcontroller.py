@@ -31,19 +31,31 @@ if not bp_debug_log.handlers:
   bp_debug_log.addHandler(handler)
 ###################################################
 
-
 LongCtrlState = car.CarControl.Actuators.LongControlState
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 LaneChangeState = log.LaneChangeState # is lane change active
 
 def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature, v_ego_raw):
+  
+    # Compute rate limits first
+  rate_limit_up = interp(v_ego_raw,
+                         CarControllerParams.ANGLE_RATE_LIMIT_UP.speed_bp,
+                         CarControllerParams.ANGLE_RATE_LIMIT_UP.angle_v)
+  rate_limit_down = interp(v_ego_raw,
+                           CarControllerParams.ANGLE_RATE_LIMIT_DOWN.speed_bp,
+                           CarControllerParams.ANGLE_RATE_LIMIT_DOWN.angle_v)
+  
   # No blending at low speed due to lack of torque wind-up and inaccurate current curvature
   if v_ego_raw > 9:
     apply_curvature = clip(apply_curvature, current_curvature - CarControllerParams.CURVATURE_ERROR,
                            current_curvature + CarControllerParams.CURVATURE_ERROR)
+    
+  bp_debug_log.info(f"[bp_debug] curvature_req={apply_curvature:.5f} last={apply_curvature_last:.5f} current={current_curvature:.5f} rate_up={rate_limit_up:.5f} rate_down={rate_limit_down:.5f}")
 
   # Curvature rate limit after driver torque limit
   apply_curvature = apply_std_steer_angle_limits(apply_curvature, apply_curvature_last, v_ego_raw, CarControllerParams)
+
+  bp_debug_log.info(f"[bp_debug] FINAL apply_curvature={apply_curvature:.5f}")
 
   return clip(apply_curvature, -CarControllerParams.CURVATURE_MAX, CarControllerParams.CURVATURE_MAX)
 
@@ -54,7 +66,7 @@ def hysteresis(current_value, old_value, target, stdDevLow: float, stdDevHigh: f
     result = 1
   elif current_value >= target + stdDevHigh:
     result = 0
-
+    
   return result
 
 def actuators_calc(self, brake):
@@ -88,6 +100,9 @@ class CarController:
     self.packer = CANPacker(dbc_name)
     self.CAN = fordcan.CanBus(CP)
     self.frame = 0
+    
+    self.button_last_ts = 0
+    self.button_last_type = None
 
     self.precision_type = 1
     self.apply_curvature_last = 0
@@ -238,6 +253,24 @@ class CarController:
     # the stock system checks for steering pressed, and eventually disengages cruise control
     elif CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0 and (self.frame % CarControllerParams.ACC_UI_STEP) == 0:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, tja_toggle=True))
+
+    import time
+    now_ts = time.monotonic()
+
+    resume = CC.cruiseControl.resume
+    cancel = CC.cruiseControl.cancel
+
+    if resume:
+      if self.button_last_type == "resume" and (now_ts - self.button_last_ts < 1.0):
+        bp_debug_log.info(f"[BP-FLAG] === USER FLAGGED EVENT (RESUME x2) @ Frame {self.frame} ===")
+      self.button_last_ts = now_ts
+      self.button_last_type = "resume"
+
+    elif cancel:
+      if self.button_last_type == "cancel" and (now_ts - self.button_last_ts < 1.0):
+        bp_debug_log.info(f"[BP-FLAG] === USER FLAGGED EVENT (CANCEL x2) @ Frame {self.frame} ===")
+      self.button_last_ts = now_ts
+      self.button_last_type = "cancel"
 
     ### lateral control ###
     # send steer msg at 20Hz
