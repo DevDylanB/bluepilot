@@ -1,5 +1,7 @@
 import numpy as np
 from cereal import car, log
+import logging
+import os
 from openpilot.common.realtime import DT_CTRL
 from opendbc.can.packer import CANPacker
 from openpilot.common.numpy_fast import clip, interp
@@ -9,6 +11,25 @@ from openpilot.selfdrive.car.ford.values import CarControllerParams, FordFlags, 
 from openpilot.selfdrive.car.interfaces import CarControllerBase
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from openpilot.selfdrive.modeld.constants import ModelConstants
+
+
+
+#############LOGGING SETUP #####################
+# Create log directory if not exists
+DEBUG_LOG_PATH = "/data/media/0/bluepilot-debug.log"
+if not os.path.exists(os.path.dirname(DEBUG_LOG_PATH)):
+  os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
+
+bp_debug_log = logging.getLogger("bluepilot_debug")
+bp_debug_log.setLevel(logging.INFO)
+
+# Avoid duplicate handlers if file reloads
+if not bp_debug_log.handlers:
+  handler = logging.FileHandler(DEBUG_LOG_PATH)
+  formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+  handler.setFormatter(formatter)
+  bp_debug_log.addHandler(handler)
+###################################################
 
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
@@ -183,7 +204,7 @@ class CarController:
         self.precharge_actutator_target = -0.1
         self.precharge_actutator_stdDevLow = 0.0
         self.precharge_actutator_stdDevHigh = 0.05
-        self.app_PC_percentage = 0.4 # what percentage of apply_curvature is derived from predicted curvature
+        self.app_PC_percentage = 0.5 # what percentage of apply_curvature is derived from predicted curvature
     else:
       self.brake_actutator_target = -0.1
       self.brake_actutator_stdDevLow = 0.00
@@ -230,7 +251,19 @@ class CarController:
         current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
         desired_curvature = actuators.curvature
         apply_curvature = desired_curvature
+        
+        bp_debug_log.info(
+          f"[BP-LOG] Frame={self.frame} | vEgoRaw={vEgoRaw:.2f} m/s | desired={desired_curvature:.5f} | "
+          f"current={current_curvature:.5f} | apply_start={apply_curvature:.5f}"
+        )
+
         immediate_curvature = apply_ford_curvature_limits(desired_curvature, self.apply_curvature_last, current_curvature, CS.out.vEgoRaw)
+        
+        if immediate_curvature != desired_curvature:
+          bp_debug_log.info(
+            f"[BP-LOG] Curvature clipped by limits: {desired_curvature:.5f} -> {immediate_curvature:.5f}"
+          )
+
         self.precision_type = 1 #precise by default
         # equate velocity
         
@@ -261,6 +294,11 @@ class CarController:
         # apply ford cuvature safety limits
         apply_curvature = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature, vEgoRaw)
         
+        if apply_curvature != desired_curvature:
+          bp_debug_log.info(
+            f"[BP-LOG] Final clipped apply_curvature={apply_curvature:.5f} | source desired={desired_curvature:.5f}"
+          )
+          
         # if changing lanes, blend PC and DC to smooth out the lane change.
         if self.lane_change:
           if apply_curvature > 0 and model_data.meta.laneChangeState == 1: # initial stages of a right lane change (positive in comma, negative when sent to Ford)
@@ -360,6 +398,10 @@ class CarController:
 
     new_actuators = actuators.copy()
     new_actuators.curvature = self.apply_curvature_last
+    
+    bp_debug_log.info(
+      f"[BP-LOG] FINAL -> Frame={self.frame} | LatActive={CC.latActive} | apply_curvature={self.apply_curvature_last:.5f} | SteeringPressed={CS.out.steeringPressed}"
+    )
 
     self.frame += 1
     self.steeringPressedLast = CS.out.steeringPressed
