@@ -1,0 +1,5 @@
+{
+    "init": "selfdrive.manager.prepare_only",
+    "main": "selfdrive.manager.manager"
+  }
+  
