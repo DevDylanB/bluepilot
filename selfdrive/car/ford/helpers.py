@@ -9,7 +9,6 @@ params = Params()
 # Define settings_params here | param_name, self_key_name, default_value, param_type
 SETTINGS_PARAMS = [
   ["FordPrefSendHandsFreeCanMsg", "send_hands_free_cluster_msg", False, bool],
-  ["FordPrefHumanTurnDetectionEnable", "enable_human_turn_detection", True, bool],
   ["FordPrefLaneDepartCanMsg", "send_lane_depart_can_msg", False, bool],
   ["FordPrefDriverMonitorCanMsg", "send_driver_monitor_can_msg", False, bool],
 ]
@@ -17,7 +16,6 @@ SETTINGS_PARAMS = [
 
 def load_initial_cc_pref_params(self_obj): # self_obj is the CarController object (self)
   self_obj.send_hands_free_cluster_msg = get_bool_param("FordPrefSendHandsFreeCanMsg", False)
-  self_obj.enable_human_turn_detection = get_bool_param("FordPrefHumanTurnDetectionEnable", True)
   self_obj.send_lane_depart_can_msg = get_bool_param("FordPrefLaneDepartCanMsg", False)
   self_obj.send_driver_monitor_can_msg = get_bool_param("FordPrefDriverMonitorCanMsg", False)
 

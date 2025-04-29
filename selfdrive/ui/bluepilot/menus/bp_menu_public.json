@@ -65,24 +65,6 @@
           }
         }
       ]
-    },
-    {
-      "groupName": "lateralControlsGroup",
-      "title": "Lateral Controls: (Tap item for desc)",
-      "enableResetButton": true,
-      "controls": [
-        {
-          "type": "toggle",
-          "param": "FordPrefHumanTurnDetectionEnable",
-          "title": "Enable Human Turn Detection",
-          "desc": "Reset steering so you don't fight the wheel making manual turns.",
-          "hidden": false,
-          "conditions": {
-            "git_remote": ["any"],
-            "git_branch": []
-          }
-        }
-      ]
     }
   ]
 }
