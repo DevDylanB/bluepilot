@@ -242,6 +242,17 @@ class CarController:
         # apply ford cuvature safety limits
         apply_curvature = apply_ford_curvature_limits(apply_curvature, self.apply_curvature_last, current_curvature, vEgoRaw)
         
+        # EPS wind-up compensation when curvature should be zero but the wheel is still off-center
+        if not steeringPressed and not self.lane_change and abs(desired_curvature) < 1e-4:
+          angle_error_rad = CS.out.steeringAngleDeg / self.CP.steerRatio
+          if abs(angle_error_rad) > 0.01:  # roughly >0.6 deg at wheel
+            base_nudge = 0.00005
+            scale = interp(vEgoRaw, [5, 30], [1.0, 0.3])
+            unwind_nudge = -np.sign(angle_error_rad) * base_nudge * scale
+
+            apply_curvature += unwind_nudge
+            self.precision_type = 0  # Use comfort mode to reduce abruptness
+
         # if changing lanes, blend PC and DC to smooth out the lane change.
         if self.lane_change:
           if apply_curvature > 0 and model_data.meta.laneChangeState == 1: # initial stages of a right lane change (positive in comma, negative when sent to Ford)
